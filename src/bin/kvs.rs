@@ -1,5 +1,7 @@
 use clap::{AppSettings, Clap};
-use std::process;
+use kvs::{KvStore, KvsError, Result};
+use std::process::exit;
+use std::env::current_dir;
 
 #[derive(Clap)]
 #[clap(name = env!("CARGO_PKG_NAME"), about = env!("CARGO_PKG_DESCRIPTION"), version = env!("CARGO_PKG_VERSION"), author = env!("CARGO_PKG_AUTHORS"))]
@@ -16,47 +18,55 @@ enum SubCommand {
     Rm(RmParams),
 }
 
-/// Set the value of a string key to a string
+/// Set the value of a string key to a string. Print an error and return a non-zero exit code on failure.
 #[derive(Clap)]
 struct SetParams {
     key: String,
     value: String,
 }
 
-/// Get the string value of a given string key
+/// Get the string value of a given string key. Print an error and return a non-zero exit code on failure.
 #[derive(Clap)]
 struct GetParams {
     key: String,
 }
 
-/// Remove a given key
+/// Remove a given key. Print an error and return a non-zero exit code on failure.
 #[derive(Clap)]
 struct RmParams {
     key: String,
 }
 
-fn main() {
+fn main() -> Result<()> {
     let opts: Opts = Opts::parse();
 
     // You can handle information about subcommands by requesting their matches by name
     // (as below), requesting just the name used, or both at the same time
     match opts.subcmd {
         SubCommand::Set(SetParams { key, value }) => {
-            eprintln!("Set unimplemented, key: {} -> value: {}", key, value);
-
-            process::exit(1);
+            let mut store = KvStore::open(current_dir()?)?;
+            store.set(key, value)?;
         }
         SubCommand::Get(GetParams { key }) => {
-            eprintln!("Get unimplemented, key: {}", key);
-
-            process::exit(1);
+            let mut store = KvStore::open(current_dir()?)?;
+            if let Some(value) = store.get(key)? {
+                println!("{}", value);
+            } else {
+                println!("Key not found");
+            }
         }
         SubCommand::Rm(RmParams { key }) => {
-            eprintln!("Rm unimplemented, key: {}", key);
-
-            process::exit(1);
+            let mut store = KvStore::open(current_dir()?)?;
+            match store.remove(key) {
+                Ok(()) => {}
+                Err(KvsError::KeyNotFound) => {
+                    println!("Key not found");
+                    exit(1);
+                }
+                Err(err) => return Err(err),
+            }
         }
     }
 
-    // more program logic goes here...
+    Ok(())
 }
