@@ -8,6 +8,9 @@ use std::path::{Path, PathBuf};
 
 use crate::{KvsError, Result};
 
+// 1MB
+const COMPACTION_THRESHOLD: u64 = 1024 * 1024;
+
 /// value representing set/rm command
 #[derive(Serialize, Deserialize, Debug)]
 pub enum Command {
@@ -30,15 +33,20 @@ impl Command {
 /// Example:
 ///
 /// ```rust
-/// use kvs::KvStore;
-/// let mut store = KvStore::new();
+/// # use kvs::{KvStore, Result};
+/// # fn try_main() -> Result<()> {
+/// use std::env::current_dir;
+///
+/// let mut store = KvStore::open(current_dir()?)?;
 ///
 /// store.set("key1".to_owned(), "value1".to_owned());
-/// assert_eq!(store.get("key1".to_owned()), Some("value1".to_owned()));
-/// assert_eq!(store.get("key2".to_owned()), None);
+/// assert_eq!(store.get("key1".to_owned())?, Some("value1".to_owned()));
+/// assert_eq!(store.get("key2".to_owned())?, None);
 ///
 /// store.remove("key1".to_owned());
-/// assert_eq!(store.get("key1".to_owned()), None);
+/// assert_eq!(store.get("key1".to_owned())?, None);
+/// # Ok(())
+/// # }
 /// ```
 pub struct KvStore {
     // directory for the log and other data.
@@ -50,6 +58,8 @@ pub struct KvStore {
     writer: BufferWriterWithPos<File>,
     // an in-memory [key -> log pointer] map.
     index: HashMap<String, CommandPos>,
+    // stale log size
+    uncompacted: u64,
 }
 
 impl KvStore {
@@ -68,9 +78,10 @@ impl KvStore {
         let mut index = HashMap::new();
 
         let gen_list = sorted_gen_list(&path)?;
+        let mut uncompacted = 0;
         for &gen in &gen_list {
             let mut reader = BufferReaderWithPos::new(File::open(log_path(&path, gen))?)?;
-            load(gen, &mut reader, &mut index)?;
+            uncompacted += load(gen, &mut reader, &mut index)?;
             readers.insert(gen, reader);
         }
 
@@ -84,6 +95,7 @@ impl KvStore {
             readers,
             writer,
             index,
+            uncompacted,
         })
     }
 
@@ -101,14 +113,16 @@ impl KvStore {
         self.writer.flush()?;
 
         if let Command::Set { key, value: _ } = cmd {
-            self.index.insert(
-                key,
-                CommandPos {
-                    gen: self.current_gen,
-                    start: pos,
-                    length: self.writer.pos - pos,
-                },
-            );
+            if let Some(old_cmd) = self
+                .index
+                .insert(key, CommandPos::new(self.current_gen, pos, self.writer.pos))
+            {
+                self.uncompacted += old_cmd.length;
+            }
+        }
+
+        if self.uncompacted > COMPACTION_THRESHOLD {
+            self.compact()?;
         }
 
         Ok(())
@@ -155,13 +169,75 @@ impl KvStore {
             self.writer.flush()?;
 
             if let Command::Remove { key } = cmd {
-                self.index.remove(&key);
+                // key 在之前的 if 已经判断为存在，这里 remove 一定会返回 Some，否则可以直接 panic
+                let old_cmd = self.index.remove(&key).expect("remove key not found");
+                self.uncompacted += old_cmd.length;
             }
 
             Ok(())
         } else {
             Err(KvsError::KeyNotFound)
         }
+    }
+
+    fn compact(&mut self) -> Result<()> {
+        // compaction generateion
+        let compaction_gen = self.current_gen + 1;
+
+        // current generation number +2, +1 for compaction
+        self.current_gen += 2;
+        self.writer = self.new_log_file(self.current_gen)?;
+
+        let mut compaction_writer = self.new_log_file(compaction_gen)?;
+
+        // compaction log 从 pos = 0 开始写入
+        let mut next_pos = 0;
+        // 遍历目前 in-memory index 中保存的 key 对应的 CommandPos
+        for active_cmd in &mut self.index.values_mut() {
+            // 根据 gen 拿到对应的 reader
+            let reader = self
+                .readers
+                .get_mut(&active_cmd.gen)
+                .expect("Cannot find the reader");
+            // 读取 log 中对应的 Command
+            // 判断当前 reader 的游标位置，读取对应的 Command 是否需要移动游标
+            if active_cmd.start != reader.pos {
+                // 需要移动移动游标
+                reader.seek(SeekFrom::Start(active_cmd.start))?;
+            }
+            let mut entry_reader = reader.take(active_cmd.length);
+            // 将对应 reader 中的内容，copy 到 compaction_reader 中来
+            let len = io::copy(&mut entry_reader, &mut compaction_writer)?;
+
+            // 更新 in-memory index 中 CommandPos 对应的信息
+            *active_cmd = CommandPos::new(compaction_gen, next_pos, next_pos + len);
+
+            next_pos += len;
+        }
+
+        // 释放 stale 的空间
+        let stale_gen_list: Vec<_> = self
+            .readers
+            .keys()
+            .filter(|&&gen| gen < compaction_gen)
+            .cloned()
+            .collect();
+        for stale_gen in stale_gen_list {
+            // 将 log 文件对应的 reader 释放掉
+            self.readers.remove(&stale_gen);
+
+            // 将 log file 也给释放掉
+            fs::remove_file(log_path(&self.path, stale_gen))?;
+        }
+
+        // 重置
+        self.uncompacted = 0;
+
+        Ok(())
+    }
+
+    fn new_log_file(&mut self, gen: u64) -> Result<BufferWriterWithPos<File>> {
+        new_log_file(&self.path, gen, &mut self.readers)
     }
 }
 
@@ -174,26 +250,30 @@ fn load(
     //  make sure we read from the beginning of the file
     let mut pos = reader.seek(SeekFrom::Start(0))?;
     let mut stream = Deserializer::from_reader(reader).into_iter::<Command>();
+    // number of bytes that can be saved after a compaction
+    let mut uncompacted = 0;
     while let Some(cmd) = stream.next() {
         let next_pos = stream.byte_offset() as u64;
         match cmd? {
             Command::Set { key, value: _ } => {
-                index.insert(
-                    key,
-                    CommandPos {
-                        gen,
-                        start: pos,
-                        length: next_pos - pos,
-                    },
-                );
+                if let Some(old_cmd) = index.insert(key, CommandPos::new(gen, pos, next_pos)) {
+                    uncompacted += old_cmd.length;
+                }
             }
             Command::Remove { key } => {
-                index.remove(&key);
+                if let Some(old_cmd) = index.remove(&key) {
+                    uncompacted += old_cmd.length;
+                }
+
+                // 这里是一个优化
+                // the "remove" command itself can be deleted in the next compaction.
+                // so we add its length to `uncompacted`
+                uncompacted += next_pos - pos;
             }
         }
         pos = next_pos;
     }
-    Ok(0)
+    Ok(uncompacted)
 }
 
 /// Returns sorted generation numbers in the given directory.
@@ -247,6 +327,16 @@ struct CommandPos {
     gen: u64,
     start: u64,
     length: u64,
+}
+
+impl CommandPos {
+    fn new(gen: u64, start: u64, end: u64) -> Self {
+        CommandPos {
+            gen,
+            start,
+            length: end - start,
+        }
+    }
 }
 
 struct BufferWriterWithPos<W: Write + Seek> {
