@@ -17,8 +17,8 @@ impl KvsClient {
     pub fn connect<A: ToSocketAddrs>(addr: A) -> Result<Self> {
         let tcp_writer = TcpStream::connect(addr)?;
         let tcp_reader = tcp_writer.try_clone()?;
-        println!("client local addr: {:?}", tcp_writer.local_addr()?);
-        println!("server addr: {:?}", tcp_writer.peer_addr()?);
+        // println!("client local addr: {:?}", tcp_writer.local_addr()?);
+        // println!("server addr: {:?}", tcp_writer.peer_addr()?);
 
         Ok(KvsClient {
             writer: BufWriter::new(tcp_writer),
@@ -32,7 +32,7 @@ impl KvsClient {
         self.writer.flush()?;
 
         let resp = SetResponse::deserialize(&mut self.reader)?;
-        println!("set response: {:?}", resp);
+        // println!("set response: {:?}", resp);
         match resp {
             SetResponse::Ok(_) => Ok(()),
             SetResponse::Err(msg) => Err(KvsError::StringError(msg)),
@@ -45,7 +45,7 @@ impl KvsClient {
         self.writer.flush()?;
 
         let resp = GetResponse::deserialize(&mut self.reader)?;
-        println!("get response: {:?}", resp);
+        // println!("get response: {:?}", resp);
         match resp {
             GetResponse::Ok(value) => Ok(value),
             GetResponse::Err(msg) => Err(KvsError::StringError(msg)),
@@ -58,7 +58,7 @@ impl KvsClient {
         self.writer.flush()?;
 
         let resp = RemoveResponse::deserialize(&mut self.reader)?;
-        println!("remove response: {:?}", resp);
+        // println!("remove response: {:?}", resp);
         match resp {
             RemoveResponse::Ok(_) => Ok(()),
             RemoveResponse::Err(msg) => Err(KvsError::StringError(msg)),

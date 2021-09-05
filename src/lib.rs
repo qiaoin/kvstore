@@ -2,7 +2,7 @@
 //! A simple kvstore
 
 pub use client::KvsClient;
-pub use engines::{KvStore, KvsEngine};
+pub use engines::{KvStore, KvsEngine, SledKvsEngine};
 pub use error::{KvsError, Result};
 pub use server::KvsServer;
 

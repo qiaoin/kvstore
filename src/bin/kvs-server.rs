@@ -1,5 +1,5 @@
 use clap::{AppSettings, Clap};
-use kvs::{KvStore, KvsEngine, KvsServer, Result};
+use kvs::{KvStore, KvsEngine, KvsServer, Result, SledKvsEngine};
 use log::{error, info, warn, LevelFilter};
 use std::env::current_dir;
 use std::fs;
@@ -51,7 +51,7 @@ fn main() {
 
     let mut opts: Opts = Opts::parse();
 
-    let res = current_engine().and_then(|curr_engine| {
+    let res = current_engine().and_then(move |curr_engine| {
         info!("curr engine: {:?}", curr_engine);
         if opts.engine.is_none() {
             opts.engine = curr_engine;
@@ -80,7 +80,7 @@ fn run(opts: Opts) -> Result<()> {
 
     match engine {
         Engine::kvs => run_with_engine(KvStore::open(current_dir()?)?, opts.addr),
-        Engine::sled => run_with_engine(KvStore::open(current_dir()?)?, opts.addr),
+        Engine::sled => run_with_engine(SledKvsEngine::open(current_dir()?)?, opts.addr),
     }
 }
 

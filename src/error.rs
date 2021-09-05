@@ -10,7 +10,7 @@ pub enum KvsError {
     #[error("Serialization or deserialization error.")]
     /// Serialization or deserialization error.
     Serde(#[from] serde_json::Error),
-    #[error("Removing non-existent key error.")]
+    #[error("Key not found")]
     /// Removing non-existent key error, key = [`key`]}.
     KeyNotFound,
     #[error("Unknown command type")]
@@ -19,6 +19,12 @@ pub enum KvsError {
     #[error("{}", _0)]
     /// Error with a string message
     StringError(String),
+    #[error("UTF-8 error.")]
+    /// Key or value is invalid UTF-8 sequence
+    Utf8(#[from] std::string::FromUtf8Error),
+    #[error("Sled error.")]
+    /// Sled error
+    Sled(#[from] sled::Error),
 }
 
 /// A specialized [`Result`] type for kvs operations.
