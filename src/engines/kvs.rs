@@ -6,6 +6,7 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
+use super::KvsEngine;
 use crate::{KvsError, Result};
 
 // 1MB
@@ -36,6 +37,7 @@ impl Command {
 /// # use kvs::{KvStore, Result};
 /// # fn try_main() -> Result<()> {
 /// use std::env::current_dir;
+/// use kvs::KvsEngine;
 ///
 /// let mut store = KvStore::open(current_dir()?)?;
 ///
@@ -99,87 +101,6 @@ impl KvStore {
         })
     }
 
-    /// Set the value of a string key to a string
-    ///
-    /// If the key already exists, the previous value will be overwritten.
-    ///
-    /// # Errors
-    ///
-    /// It propagates I/O or serialization errors during writing the log.
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        let cmd = Command::set(key, value);
-        let pos = self.writer.pos;
-        serde_json::to_writer(&mut self.writer, &cmd)?;
-        self.writer.flush()?;
-
-        if let Command::Set { key, value: _ } = cmd {
-            if let Some(old_cmd) = self
-                .index
-                .insert(key, CommandPos::new(self.current_gen, pos, self.writer.pos))
-            {
-                self.uncompacted += old_cmd.length;
-            }
-        }
-
-        if self.uncompacted > COMPACTION_THRESHOLD {
-            self.compact()?;
-        }
-
-        Ok(())
-    }
-
-    /// Get the string value of the a string key.
-    ///
-    /// If the key does not exist, return `None`.
-    ///
-    /// # Errors
-    ///
-    /// It returns `KvsError::UnexpectedCommandType` if the given command type unexpected.
-    pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        if let Some(cmd_pos) = self.index.get(&key) {
-            let reader = self
-                .readers
-                .get_mut(&cmd_pos.gen)
-                .expect("Cannot find log reader");
-            // key --> command's start postion
-            reader.seek(SeekFrom::Start(cmd_pos.start))?;
-            // key --> command's length
-            let cmd_reader = reader.take(cmd_pos.length);
-            if let Command::Set { key: _, value } = serde_json::from_reader(cmd_reader)? {
-                Ok(Some(value))
-            } else {
-                Err(KvsError::UnexpectedCommandType)
-            }
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Remove a given key.
-    ///
-    /// # Errors
-    ///
-    /// It returns `KvsError::KeyNotFound` if the given key is not found.
-    ///
-    /// It propagates I/O or serialization errors during writing the log.
-    pub fn remove(&mut self, key: String) -> Result<()> {
-        if self.index.contains_key(&key) {
-            let cmd = Command::remove(key);
-            serde_json::to_writer(&mut self.writer, &cmd)?;
-            self.writer.flush()?;
-
-            if let Command::Remove { key } = cmd {
-                // key 在之前的 if 已经判断为存在，这里 remove 一定会返回 Some，否则可以直接 panic
-                let old_cmd = self.index.remove(&key).expect("remove key not found");
-                self.uncompacted += old_cmd.length;
-            }
-
-            Ok(())
-        } else {
-            Err(KvsError::KeyNotFound)
-        }
-    }
-
     fn compact(&mut self) -> Result<()> {
         // compaction generateion
         let compaction_gen = self.current_gen + 1;
@@ -238,6 +159,89 @@ impl KvStore {
 
     fn new_log_file(&mut self, gen: u64) -> Result<BufferWriterWithPos<File>> {
         new_log_file(&self.path, gen, &mut self.readers)
+    }
+}
+
+impl KvsEngine for KvStore {
+    /// Set the value of a string key to a string
+    ///
+    /// If the key already exists, the previous value will be overwritten.
+    ///
+    /// # Errors
+    ///
+    /// It propagates I/O or serialization errors during writing the log.
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        let cmd = Command::set(key, value);
+        let pos = self.writer.pos;
+        serde_json::to_writer(&mut self.writer, &cmd)?;
+        self.writer.flush()?;
+
+        if let Command::Set { key, value: _ } = cmd {
+            if let Some(old_cmd) = self
+                .index
+                .insert(key, CommandPos::new(self.current_gen, pos, self.writer.pos))
+            {
+                self.uncompacted += old_cmd.length;
+            }
+        }
+
+        if self.uncompacted > COMPACTION_THRESHOLD {
+            self.compact()?;
+        }
+
+        Ok(())
+    }
+
+    /// Get the string value of the a string key.
+    ///
+    /// If the key does not exist, return `None`.
+    ///
+    /// # Errors
+    ///
+    /// It returns `KvsError::UnexpectedCommandType` if the given command type unexpected.
+    fn get(&mut self, key: String) -> Result<Option<String>> {
+        if let Some(cmd_pos) = self.index.get(&key) {
+            let reader = self
+                .readers
+                .get_mut(&cmd_pos.gen)
+                .expect("Cannot find log reader");
+            // key --> command's start postion
+            reader.seek(SeekFrom::Start(cmd_pos.start))?;
+            // key --> command's length
+            let cmd_reader = reader.take(cmd_pos.length);
+            if let Command::Set { key: _, value } = serde_json::from_reader(cmd_reader)? {
+                Ok(Some(value))
+            } else {
+                Err(KvsError::UnexpectedCommandType)
+            }
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Remove a given key.
+    ///
+    /// # Errors
+    ///
+    /// It returns `KvsError::KeyNotFound` if the given key is not found.
+    ///
+    /// It propagates I/O or serialization errors during writing the log.
+    fn remove(&mut self, key: String) -> Result<()> {
+        if self.index.contains_key(&key) {
+            let cmd = Command::remove(key);
+            serde_json::to_writer(&mut self.writer, &cmd)?;
+            self.writer.flush()?;
+
+            if let Command::Remove { key } = cmd {
+                // key 在之前的 if 已经判断为存在，这里 remove 一定会返回 Some，否则可以直接 panic
+                let old_cmd = self.index.remove(&key).expect("remove key not found");
+                self.uncompacted += old_cmd.length;
+            }
+
+            Ok(())
+        } else {
+            Err(KvsError::KeyNotFound)
+        }
     }
 }
 

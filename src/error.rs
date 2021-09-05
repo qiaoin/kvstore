@@ -13,9 +13,12 @@ pub enum KvsError {
     #[error("Removing non-existent key error.")]
     /// Removing non-existent key error, key = [`key`]}.
     KeyNotFound,
-    #[error("unknown command type")]
+    #[error("Unknown command type")]
     /// unknown command type
     UnexpectedCommandType,
+    #[error("{}", _0)]
+    /// Error with a string message
+    StringError(String),
 }
 
 /// A specialized [`Result`] type for kvs operations.
